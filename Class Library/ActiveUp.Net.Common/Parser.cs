@@ -23,6 +23,8 @@ using System;
 using System.Text;
 using ActiveUp.Net.Security;
 using System.IO;
+using ActiveUp.Net.Common;
+using System.Linq;
 
 namespace ActiveUp.Net.Mail
 {
@@ -133,55 +135,36 @@ namespace ActiveUp.Net.Mail
         /// Parses the sub parts.
         /// </summary>
         /// <param name="part">The part.</param>
-        private static void ParseSubParts(ref MimePart part, Message message)
+        /// <param name="message">The message to add the data</param>
+        /// <param name="compact">removes the original content string from mime parts. To get the string later, use <see cref="MimePart.DecodeOriginalContent()"/></param>
+        private static void ParseSubParts(ref MimePart part, Message message, bool compact)
         {
-            string boundary = part.ContentType.Parameters["boundary"];
-            string parentPartAsciiBody = ToASCII(part.BinaryContent);
             byte[] parentPartBinary = part.BinaryContent;
+            byte[] boundary = Encoding.ASCII.GetBytes("--" + part.ContentType.Parameters["boundary"]);
+            int[] boundaryPositions = parentPartBinary.IndexOf(boundary).ToArray();
+            int last = 0;
 
-            Logger.AddEntry(typeof(Parser), "boundary : " + boundary);
-            string[] arrpart = Regex.Split(parentPartAsciiBody, @"\r?\n?" + Regex.Escape("--" + boundary));
-
-            foreach (var strpart in arrpart)
+            foreach (int pos in boundaryPositions)
             {
-                if (string.IsNullOrWhiteSpace(strpart))
+                if (pos == 0)
                     continue;
-
-                int bounaryByteLen = GetASCIIByteCountOfPart(parentPartAsciiBody.Substring(0, parentPartAsciiBody.IndexOf(strpart)));
-                int binaryPartLen = bounaryByteLen + GetASCIIByteCountOfPart(strpart);
-                parentPartAsciiBody = null;
-
                 //complete Part (incl. boundary)
-                byte[] binaryPart = new byte[binaryPartLen];
-                Array.Copy(parentPartBinary, binaryPart, binaryPart.Length);
+                byte[] binaryPart = new byte[pos - last];
+                Array.Copy(parentPartBinary, last, binaryPart, 0, binaryPart.Length);
 
                 //Body only (without Boundary)
-                byte[] binaryBody = new byte[GetASCIIByteCountOfPart(strpart)];
-                Array.Copy(binaryPart, bounaryByteLen, binaryBody, 0, binaryBody.Length);
+                int bodyLength = pos - last - (boundary.Length + 2);
+                if (bodyLength <= 0)
+                    continue;
+                byte[] binaryBody = new byte[bodyLength];
+                Array.Copy(binaryPart, (boundary.Length + 2), binaryBody, 0, binaryBody.Length);
 
-                //Remove Subpart from ParentPart
-                byte[] tmp = new byte[parentPartBinary.Length - binaryPart.Length];
-                Array.Copy(parentPartBinary, binaryPart.Length, tmp, 0, (parentPartBinary.Length - binaryPart.Length));
-
-                parentPartBinary = null;
                 binaryPart = null;
-                GC.Collect(GC.MaxGeneration);
-                GC.WaitForPendingFinalizers();
 
-                parentPartBinary = tmp;
-                parentPartAsciiBody = ToASCII(parentPartBinary);
-                tmp = null;
-
-                if (!strpart.StartsWith("--") && !string.IsNullOrEmpty(strpart))
-                {
-                    MimePart newpart = ParseMimePart(binaryBody, message);
-                    newpart.Container = part;
-                    part.SubParts.Add(newpart);
-                }
-
-                binaryBody = null;
-                GC.Collect(GC.MaxGeneration);
-                GC.WaitForPendingFinalizers();
+                MimePart newpart = ParseMimePart(binaryBody, message, compact);
+                newpart.Container = part;
+                part.SubParts.Add(newpart);
+                last = pos;
             }
         }
 
@@ -192,8 +175,8 @@ namespace ActiveUp.Net.Mail
         /// <param name="message">The message.</param>
         private static void DispatchParts(MimePart root, ref Message message)
         {
-            foreach (MimePart entity in root.SubParts)
-                DispatchPart(entity, ref message);
+            foreach (MimePart part in root.SubParts)
+                DispatchPart(part, ref message);
         }
 
         /// <summary>
@@ -314,7 +297,7 @@ namespace ActiveUp.Net.Mail
                 }
                 else if (part.ContentTransferEncoding.Equals(ContentTransferEncoding.QuotedPrintable))
                 {
-                    part.TextContent = Codec.FromQuotedPrintable(ToASCII(part.BinaryContent), charset);
+                    part.TextContent = Codec.FromQuotedPrintable(part.BinaryContent.ToASCII(), charset);
                     part.BinaryContent = Codec.GetEncoding(charset).GetBytes(part.TextContent);
                 }
                 else
@@ -330,7 +313,7 @@ namespace ActiveUp.Net.Mail
 
         private static void DecodeBase64Part(MimePart part, string charset)
         {
-            string text = ToASCII(part.BinaryContent);
+            string text = part.BinaryContent.ToASCII();
             byte[] binary = null;
 #if !PocketPC
             try
@@ -345,7 +328,7 @@ namespace ActiveUp.Net.Mail
                 binary = Convert.FromBase64String(text);
             }
 #endif
-            text = ToASCII(binary);
+            text = binary.ToASCII();
             if (part.ContentDisposition != ContentDisposition.Attachment)
                 text = Codec.GetEncoding(charset).GetString(binary, 0, binary.Length);
 
@@ -451,28 +434,13 @@ namespace ActiveUp.Net.Mail
         /// Delegate for body parsed event.
         /// </summary>
         /// <param name="sender">The sender object.</param>
-        /// <param name="header">The header object.</param>
+        /// <param name="message">The message object.</param>
         public delegate void OnBodyParsedEvent(object sender, Message message);
 
         /// <summary>
         /// Event handler for body parsed.
         /// </summary>
         public static event OnBodyParsedEvent BodyParsed;
-
-        private static string ToASCII(byte[] data)
-        {
-            const int BUFFER_SIZE = 2048;
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < data.Length; i += BUFFER_SIZE)
-                sb.Append(ConvertByteBlock(data, i, Math.Min(BUFFER_SIZE, data.Length - i)));
-
-            return sb.ToString();
-        }
-
-        private static string ConvertByteBlock(byte[] data, int start, int length)
-        {
-            return Encoding.ASCII.GetString(data, start, length);
-        }
 
         private static void ParseHeaderFields(MimePart part, int headerEnd)
         {
@@ -504,12 +472,14 @@ namespace ActiveUp.Net.Mail
         /// Parses the MIME part.
         /// </summary>
         /// <param name="binaryData">The data.</param>
+        /// <param name="message">The message to add the data</param>
+        /// <param name="compact">removes the original content string from mime parts. To get the string later, use <see cref="MimePart.DecodeOriginalContent()"/></param>
         /// <returns></returns>
-        public static MimePart ParseMimePart(byte[] binaryData, Message message)
+        public static MimePart ParseMimePart(byte[] binaryData, Message message, bool compact)
         {
             MimePart part = new MimePart();
             part.ParentMessage = message;
-            part.OriginalContent = ToASCII(binaryData); //ASCII content for header parsing            
+            part.OriginalContent = binaryData.ToASCII(); //ASCII content for header parsing
 
             try
             {
@@ -532,9 +502,7 @@ namespace ActiveUp.Net.Mail
                     // Build the part tree.
                     // This is a container part.
                     if (part.ContentType.Type.ToLower().Equals("multipart"))
-                    {
-                        ParseSubParts(ref part, message);
-                    }
+                        ParseSubParts(ref part, message, compact);
                     // This is a nested message.
                     else if (part.ContentType.Type.ToLower().Equals("message"))
                     {
@@ -542,11 +510,11 @@ namespace ActiveUp.Net.Mail
                     }
                     // Other types.
                     else
-                    {
                         DecodePartBody(ref part);
-                    }
 
-                    // Call event id BodyParsed is not null.
+                    if (compact)
+                        part.OriginalContent = null;
+
                     BodyParsed?.Invoke(null, message);
                 }
             }
@@ -779,7 +747,7 @@ namespace ActiveUp.Net.Mail
         /// Delegate for OnErrorParsingEvent.
         /// </summary>
         /// <param name="sender">The sender object.</param>
-        /// <param name="header">The exception object.</param>
+        /// <param name="ex">The exception object.</param>
         public delegate void OnErrorParsingEvent(object sender, Exception ex);
 
         /// <summary>
@@ -791,15 +759,16 @@ namespace ActiveUp.Net.Mail
         /// Parses the message.
         /// </summary>
         /// <param name="data">The data.</param>
+        /// <param name="compact">removes the original content string from mime parts. To get the string later, use <see cref="MimePart.DecodeOriginalContent()"/></param>
         /// <returns></returns>
-        public static Message ParseMessage(byte[] data)
+        public static Message ParseMessage(byte[] data, bool compact = false)
         {
             Message message = new Message();
 
             try
             {
                 // Build a part tree and get all headers. 
-                MimePart part = ParseMimePart(data, message);
+                MimePart part = ParseMimePart(data, message, compact);
 
                 // Fill a new message object with the new information.
                 message.OriginalData = data;
@@ -861,8 +830,7 @@ namespace ActiveUp.Net.Mail
             }
             catch (Exception ex)
             {
-                if (ErrorParsing != null)
-                    ErrorParsing(null, ex);
+                ErrorParsing?.Invoke(null, ex);
             }
             return message;
 
@@ -872,6 +840,7 @@ namespace ActiveUp.Net.Mail
         /// Parses a MemoryStream's content to a Message object.
         /// </summary>
         /// <param name="inputStream">The MemoryStream containing the Header data to be parsed.</param>
+        /// <param name="compact">removes the original content string from mime parts. To get the string later, use <see cref="MimePart.DecodeOriginalContent()"/></param>
         /// <returns>The parsed Header as a Message object.</returns>
         /// <example>
         /// <code>
@@ -894,13 +863,13 @@ namespace ActiveUp.Net.Mail
         /// var subject:string = message.Subject;
         /// </code>
         /// </example>
-        public static Message ParseMessage(MemoryStream inputStream)
+        public static Message ParseMessage(MemoryStream inputStream, bool compact = false)
         {
             byte[] buf = new byte[inputStream.Length];
             inputStream.Read(buf, 0, buf.Length);
             Message msg = new Message();
             msg.OriginalData = buf;
-            ParseMessage(buf);
+            ParseMessage(buf, compact);
             return msg;
         }
 
@@ -908,6 +877,7 @@ namespace ActiveUp.Net.Mail
         /// Parses a Message from a string formatted accordingly to the RFC822.
         /// </summary>
         /// <param name="data">The string containing the message data to be parsed.</param>
+        /// <param name="compact">removes the original content string from mime parts. To get the string later, use <see cref="MimePart.DecodeOriginalContent()"/></param>
         /// <returns>The parsed message as a Message object.</returns>
         /// <example>
         /// <code>
@@ -930,10 +900,10 @@ namespace ActiveUp.Net.Mail
         /// var subject:string = message.Subject;
         /// </code>
         /// </example>
-        public static Message ParseMessage(string data)
+        public static Message ParseMessage(string data, bool compact = false)
         {
 #if !PocketPC
-            return ParseMessage(Encoding.GetEncoding("iso-8859-1").GetBytes(data));
+            return ParseMessage(Encoding.GetEncoding("iso-8859-1").GetBytes(data), compact);
 #else
             return Parser.ParseMessage(Pop3Client.PPCEncode.GetBytes(data));
 #endif
@@ -943,6 +913,7 @@ namespace ActiveUp.Net.Mail
         /// Parses a message from a file to a Message object.
         /// </summary>
         /// <param name="filePath">The path of the file to be parsed.</param>
+        /// <param name="compact">removes the original content string from mime parts. To get the string later, use <see cref="MimePart.DecodeOriginalContent()"/></param>
         /// <returns>The parsed message as a Message object.</returns>
         /// <example>
         /// <code>
@@ -965,7 +936,7 @@ namespace ActiveUp.Net.Mail
         /// var subject:string = message.Subject;
         /// </code>
         /// </example> 
-        public static Message ParseMessageFromFile(string filePath)
+        public static Message ParseMessageFromFile(string filePath, bool compact = false)
         {
             byte[] data = null;
 
@@ -974,7 +945,7 @@ namespace ActiveUp.Net.Mail
                 data = new byte[fs.Length];
                 ReadStream(fs, data);
             }
-            return ParseMessage(data);
+            return ParseMessage(data, compact);
         }
 
         private static void ReadStream(Stream stream, byte[] data)

@@ -21,6 +21,7 @@ using System.Text;
 using System.Linq;
 using System.Collections.Generic;
 using ActiveUp.Net.Common.Rfc2047;
+using ActiveUp.Net.Common;
 #if !PocketPC
 using System.Security.Cryptography.Pkcs;
 #endif
@@ -355,6 +356,14 @@ namespace ActiveUp.Net.Mail
         /// The original content of a parsed MIME Part.
         /// </summary>
         public string OriginalContent { get; set; }
+
+        /// <summary>
+        /// Decodes the <see cref="BinaryContent"/> again to <see cref="OriginalContent"/> 
+        /// </summary>
+        public void DecodeOriginalContent()
+        {
+            OriginalContent = BinaryContent.ToASCII();
+        }
 
         /// <summary>
         /// The Content-Type of the MimePart.

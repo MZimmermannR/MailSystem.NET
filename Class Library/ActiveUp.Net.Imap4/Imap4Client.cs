@@ -1160,19 +1160,20 @@ namespace ActiveUp.Net.Mail
                     }
                 }
 
-                var bufferString = buffer.ToString();
                 byte[] bufferBytes = new byte[sr.BaseStream.Length];
                 sr.BaseStream.Seek(0, SeekOrigin.Begin);
                 sr.BaseStream.Read(bufferBytes, 0, bufferBytes.Length);
 
-                if (!sr.CurrentEncoding.Equals(Encoding.UTF8))
-                    {
-                    var utf8Bytes = Encoding.Convert(sr.CurrentEncoding, Encoding.UTF8, sr.CurrentEncoding.GetBytes(bufferString));
-                    bufferString = Encoding.UTF8.GetString(utf8Bytes);
-                }
-
                 if (buffer.Length < 200)
+                {
+                    var bufferString = buffer.ToString();
+                    if (!sr.CurrentEncoding.Equals(Encoding.UTF8))
+                    {
+                        var utf8Bytes = Encoding.Convert(sr.CurrentEncoding, Encoding.UTF8, sr.CurrentEncoding.GetBytes(bufferString));
+                        bufferString = Encoding.UTF8.GetString(utf8Bytes);
+                    }
                     OnTcpRead(new TcpReadEventArgs(bufferString));
+                }
                 else
                     OnTcpRead(new TcpReadEventArgs("long data"));
                 if (lastLine.StartsWith(stamp + " OK") || lastLine.ToLower().StartsWith("* " + command.Split(' ')[0].ToLower()) || lastLine.StartsWith("+ "))
@@ -1185,13 +1186,13 @@ namespace ActiveUp.Net.Mail
         private bool CheckResponse(StringBuilder buffer, string command, string lastLineOfPartResponse, ref string lastLine, string stamp)
         {
             if (buffer.Length > 100)
-                lastLineOfPartResponse = buffer.ToString().Substring(buffer.Length - 100).Replace("\r\n", "");
+                lastLineOfPartResponse = buffer.ToString(buffer.Length - 100, 100).Replace("\r\n", "");
             else
                 lastLineOfPartResponse = buffer.ToString().Replace("\r\n", "");
             int stampPos = lastLineOfPartResponse.IndexOf(stamp + " OK");
             if (stampPos >= 0)
             {
-                if (buffer.ToString().EndsWith("\n") || buffer.ToString().EndsWith("\r"))
+                if (buffer.ToString(buffer.Length - 100, 100).EndsWith("\n") || buffer.ToString(buffer.Length - 100, 100).EndsWith("\r"))
                 {
                     lastLine = lastLineOfPartResponse.Substring(stampPos);
                     return true;
@@ -1200,7 +1201,7 @@ namespace ActiveUp.Net.Mail
             stampPos = lastLineOfPartResponse.IndexOf(stamp + " NO");
             if (stampPos >= 0)
             {
-                if (buffer.ToString().EndsWith("\n") || buffer.ToString().EndsWith("\r"))
+                if (buffer.ToString(buffer.Length - 100, 100).EndsWith("\n") || buffer.ToString(buffer.Length - 100, 100).EndsWith("\r"))
                 {
                     lastLine = lastLineOfPartResponse.Replace(stamp, "");
                     throw new Imap4Exception("Command \"" + command + "\" failed\r\nServer replied:" + lastLine);
@@ -1209,7 +1210,7 @@ namespace ActiveUp.Net.Mail
             stampPos = lastLineOfPartResponse.IndexOf(stamp + " BAD");
             if (stampPos >= 0)
             {
-                if (buffer.ToString().EndsWith("\n") || buffer.ToString().EndsWith("\r"))
+                if (buffer.ToString(buffer.Length - 100, 100).EndsWith("\n") || buffer.ToString(buffer.Length - 100, 100).EndsWith("\r"))
                 {
                     lastLine = lastLineOfPartResponse.Replace(stamp, "");
                     throw new Imap4Exception("Command \"" + command + "\" failed\r\nServer replied:" + lastLine);
